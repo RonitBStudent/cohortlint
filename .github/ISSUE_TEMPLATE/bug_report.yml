@@ -1,0 +1,36 @@
+name: Bug report
+description: Report incorrect behavior using de-identified information only.
+title: "[bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not attach genomic data, protected health information, credentials, or unredacted reports."
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal safe reproduction
+      description: Provide synthetic input or commands with all identifiers and paths redacted.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CohortLint version
+      placeholder: "cohortlint 0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Paste de-identified `cohortlint doctor` output.
+    validations:
+      required: true
