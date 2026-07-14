@@ -136,6 +136,21 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(rows[0].fastq_1, str(read_1))
         self.assertEqual(rows[0].fastq_2, str(read_2))
 
+    def test_discover_flags_multilane_fastq_as_unsupported(self) -> None:
+        first_r1 = self.touch("input/P1_L001_R1_001.fastq.gz")
+        first_r2 = self.touch("input/P1_L001_R2_001.fastq.gz")
+        self.touch("input/P1_L002_R1_001.fastq.gz")
+        self.touch("input/P1_L002_R2_001.fastq.gz")
+
+        rows, findings = discover(self.root / "input")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].sample_id, "P1")
+        self.assertEqual(rows[0].fastq_1, str(first_r1))
+        self.assertEqual(rows[0].fastq_2, str(first_r2))
+        self.assertIn("DISCOVERY_MULTIPART_FASTQ_UNSUPPORTED", self.codes(findings))
+        self.assertIn("DISCOVERY_ROLE_AMBIGUOUS", self.codes(findings))
+
     def test_discover_warns_when_one_role_has_multiple_candidates(self) -> None:
         first = self.touch("input/alpha.bam")
         self.touch("input/alpha.cram")
@@ -186,6 +201,16 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 2)
         self.assertNotIn("DUPLICATE_FILE_OWNERSHIP", {finding.code for finding in findings})
+
+    def test_invalid_manifest_path_becomes_a_finding(self) -> None:
+        manifest = self.write_csv(
+            [list(MANIFEST_FIELDS), ["alpha", "", "bad\0path.fastq", "", "", ""]]
+        )
+
+        rows, findings = load_manifest(manifest)
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("MANIFEST_PATH_INVALID", self.codes(findings))
 
 
 if __name__ == "__main__":

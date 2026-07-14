@@ -15,21 +15,33 @@ def _context(finding: Finding) -> str:
     return "  " + "  ".join(values) if values else ""
 
 
+def _count(value: int, singular: str, plural: str | None = None) -> str:
+    return f"{value} {singular if value == 1 else plural or singular + 's'}"
+
+
 def render_text(report: Report, *, verbose: bool = False) -> str:
     if report.errors:
-        state = "NOT READY"
+        state = "BLOCKING FINDINGS"
     elif report.warnings:
-        state = "READY WITH WARNINGS"
+        state = "WARNINGS PRESENT"
     else:
-        state = "READY"
+        state = "NO BLOCKING FINDINGS"
     lines = [
-        f"COHORT {state}",
-        "═" * (7 + len(state)),
-        f"{report.sample_count} samples  {report.site_count} sites  {report.file_count} files",
+        f"CHECK RESULT: {state}",
+        "═" * (14 + len(state)),
+        "  ".join((
+            _count(report.sample_count, "sample"),
+            _count(report.site_count, "site"),
+            _count(report.file_count, "file"),
+        )),
     ]
     if report.reference_fingerprint:
         lines.append(f"reference dictionary  {report.reference_fingerprint}")
-    lines.append(f"{report.errors} errors  {report.warnings} warnings  {report.infos} notes")
+    lines.append("  ".join((
+        _count(report.errors, "error"),
+        _count(report.warnings, "warning"),
+        _count(report.infos, "note"),
+    )))
 
     visible = report.findings if verbose else tuple(item for item in report.findings if item.severity != Severity.INFO)
     if visible:
@@ -43,7 +55,7 @@ def render_text(report: Report, *, verbose: bool = False) -> str:
             lines.append(f"        Fix: {finding.remediation}")
         lines.append("")
     if not visible:
-        lines.extend(("", "No blocking interoperability problems detected.", ""))
+        lines.extend(("", "No blocking findings detected in the checks performed.", ""))
     elif not verbose and report.infos:
         lines.append(f"Use --verbose to show {report.infos} informational finding(s).")
     return "\n".join(lines).rstrip() + "\n"

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import sys
+import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Sequence
 
@@ -10,7 +13,7 @@ from . import __version__
 from .demo import write_demo
 from .engine import check_cohort
 from .external import tool_version
-from .manifest import discover, write_manifest
+from .manifest import discover, render_manifest
 from .model import CohortLintError, Severity
 from .output import render_json, render_text
 
@@ -46,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--max-records", type=int, default=10_000, metavar="N", help="records sampled per file (default: 10000)")
     check.add_argument("--format", choices=("text", "json"), default="text")
     check.add_argument("--output", type=Path, help="write the report instead of printing it")
+    check.add_argument("--force", action="store_true", help="replace an existing report (never an input file)")
     check.add_argument("--verbose", action="store_true", help="include informational findings")
     check.add_argument("--fail-on", choices=("error", "warning"), default="error", help="finding level that produces exit 1")
 
@@ -64,15 +68,67 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_or_print(text: str, path: Path | None) -> None:
+def _write_or_print(
+    text: str,
+    path: Path | None,
+    *,
+    force: bool = False,
+    protected_paths: Iterable[str | Path] = (),
+    announce: bool = True,
+) -> None:
     if path is None:
         sys.stdout.write(text)
         return
+
+    destination = path.expanduser()
+    resolved_destination = destination.resolve(strict=False)
+    protected = {
+        Path(candidate).expanduser().resolve(strict=False)
+        for candidate in protected_paths
+        if candidate
+    }
+    if resolved_destination in protected:
+        raise CohortLintError(
+            f"refusing to overwrite an input file with the report: {destination}"
+        )
+    if destination.exists() and not force:
+        raise CohortLintError(
+            f"output already exists: {destination}; pass --force to replace it"
+        )
+
+    temporary: Path | None = None
     try:
-        path.write_text(text, encoding="utf-8")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if force:
+            os.replace(temporary, destination)
+            temporary = None
+        else:
+            try:
+                os.link(temporary, destination)
+            except FileExistsError as error:
+                raise CohortLintError(
+                    f"output already exists: {destination}; pass --force to replace it"
+                ) from error
     except OSError as error:
-        raise CohortLintError(f"cannot write {path}: {error.strerror or error}") from error
-    print(f"cohortlint: wrote {path}", file=sys.stderr)
+        raise CohortLintError(
+            f"cannot write {destination}: {error.strerror or error}"
+        ) from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    if announce:
+        print(f"cohortlint: wrote {destination}", file=sys.stderr)
 
 
 def _doctor() -> str:
@@ -105,13 +161,18 @@ def run(arguments: argparse.Namespace) -> int:
                 f"output already exists: {arguments.output}; pass --force to replace it"
             )
         rows, findings = discover(arguments.directory, recursive=not arguments.no_recursive)
-        fatal = next(
-            (finding for finding in findings if finding.severity == Severity.ERROR),
-            None,
+        if not rows:
+            cause = next(iter(findings), None)
+            message = cause.message if cause is not None else "no usable samples were discovered"
+            path = cause.path if cause is not None else str(arguments.directory)
+            raise CohortLintError(f"{message}: {path}")
+        _write_or_print(
+            render_manifest(rows),
+            arguments.output,
+            force=arguments.force,
+            protected_paths=(path for row in rows for _, path in row.paths()),
+            announce=False,
         )
-        if not rows and fatal is not None:
-            raise CohortLintError(f"{fatal.message}: {fatal.path or arguments.directory}")
-        write_manifest(rows, arguments.output)
         print(f"cohortlint: wrote {arguments.output} with {len(rows)} sample(s)", file=sys.stderr)
         for finding in findings:
             print(f"{finding.severity.label}: {finding.code}: {finding.message}", file=sys.stderr)
@@ -138,7 +199,17 @@ def run(arguments: argparse.Namespace) -> int:
         full=arguments.full,
     )
     text = render_json(report) if arguments.format == "json" else render_text(report, verbose=arguments.verbose)
-    _write_or_print(text, arguments.output)
+    protected_paths: list[str | Path] = [arguments.manifest]
+    if arguments.reference:
+        protected_paths.append(arguments.reference)
+    protected_paths.extend(inspection.path for inspection in report.inspections)
+    protected_paths.extend(finding.path for finding in report.findings if finding.path)
+    _write_or_print(
+        text,
+        arguments.output,
+        force=arguments.force,
+        protected_paths=protected_paths,
+    )
     if report.errors:
         return 1
     if arguments.fail_on == "warning" and report.warnings:
@@ -151,6 +222,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return run(arguments)
     except CohortLintError as error:
+        print(f"cohortlint: error: {error}", file=sys.stderr)
+        return 2
+    except (OSError, UnicodeError) as error:
         print(f"cohortlint: error: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

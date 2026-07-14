@@ -139,6 +139,36 @@ class InspectFastqPairTests(unittest.TestCase):
         self.assertEqual(result.metrics["records_1"], 2)
         self.assertEqual(result.metrics["records_2"], 1)
 
+    def test_sample_scan_detects_pair_count_mismatch_at_record_budget(self) -> None:
+        first = self.write(
+            "bounded_R1.fastq",
+            "".join(_record(f"read-{index}/1") for index in range(5)),
+        )
+        second = self.write(
+            "bounded_R2.fastq",
+            "".join(_record(f"read-{index}/2") for index in range(2)),
+        )
+
+        result = inspect_fastq_pair(
+            first,
+            second,
+            sample_id="bounded-orphan",
+            max_records=3,
+        )
+
+        count_findings = [
+            finding
+            for finding in result.findings
+            if finding.code == "FASTQ_PAIR_COUNT_MISMATCH"
+        ]
+        self.assertEqual(len(count_findings), 1)
+        self.assertEqual(result.metrics["issue_counts"]["FASTQ_PAIR_COUNT_MISMATCH"], 1)
+        self.assertEqual(result.metrics["records_1"], 3)
+        self.assertEqual(result.metrics["records_2"], 2)
+        self.assertIn("R1=3+", count_findings[0].detail)
+        self.assertIn("R2=2", count_findings[0].detail)
+        self.assertFalse(result.metrics["scan_complete"])
+
     def test_sample_mode_obeys_record_budget(self) -> None:
         path = self.write(
             "long.fastq",

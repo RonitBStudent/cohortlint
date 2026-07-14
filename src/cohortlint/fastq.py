@@ -192,6 +192,9 @@ class _FastqReader:
                         detail=f"Record has {len(lines)} of 4 lines; {missing} line(s) are missing.",
                         remediation="Re-transfer or regenerate this FASTQ file before analysis.",
                     )
+                    # The physical end was reached, but this is not a
+                    # successful complete scan: the final record is unusable.
+                    self.failed = True
                     self.clean_eof = True
                     return None
                 lines.append(line)
@@ -373,6 +376,7 @@ def inspect_fastq_pair(
 
     pair_ids_compared = 0
     pair_id_mismatches = 0
+    pair_count_mismatch_observed = False
     limit = None if full else max_records
     iterations = 0
 
@@ -384,6 +388,22 @@ def inspect_fastq_pair(
                 if record_1 is None and record_2 is None:
                     break
                 iterations += 1
+                # A clean EOF on one side while a complete record exists on
+                # the other proves unequal mate counts immediately.  Record
+                # that fact even when this iteration consumes the sampling
+                # budget and the longer file cannot be scanned to its EOF.
+                if (
+                    record_1 is None
+                    and record_2 is not None
+                    and first.clean_eof
+                    and not first.failed
+                ) or (
+                    record_2 is None
+                    and record_1 is not None
+                    and second.clean_eof
+                    and not second.failed
+                ):
+                    pair_count_mismatch_observed = True
                 if record_1 is not None and record_2 is not None:
                     if record_1.read_id is not None and record_2.read_id is not None:
                         pair_ids_compared += 1
@@ -413,7 +433,12 @@ def inspect_fastq_pair(
             reader.close()
 
     for reader in readers:
-        if reader.available and reader.records == 0 and reader.clean_eof:
+        if (
+            reader.available
+            and reader.records == 0
+            and reader.clean_eof
+            and not reader.failed
+        ):
             collector.add(
                 "FASTQ_EMPTY_FILE",
                 Severity.ERROR,
@@ -422,7 +447,7 @@ def inspect_fastq_pair(
                 remediation="Provide a non-empty FASTQ file or remove this sample from the manifest.",
             )
 
-    if (
+    exact_pair_count_mismatch = (
         second is not None
         and first.available
         and second.available
@@ -431,13 +456,22 @@ def inspect_fastq_pair(
         and not first.failed
         and not second.failed
         and first.records != second.records
+    )
+    if second is not None and (
+        pair_count_mismatch_observed or exact_pair_count_mismatch
     ):
+        count_1 = f"{first.records:,}" + (
+            "" if first.clean_eof and not first.failed else "+"
+        )
+        count_2 = f"{second.records:,}" + (
+            "" if second.clean_eof and not second.failed else "+"
+        )
         collector.add(
             "FASTQ_PAIR_COUNT_MISMATCH",
             Severity.ERROR,
             "Paired FASTQ files contain different numbers of records",
             path=f"{path_1} | {path_2}",
-            detail=f"R1={first.records:,}, R2={second.records:,}",
+            detail=f"R1={count_1}, R2={count_2} ('+' means at least this many records)",
             remediation="Recover the missing mates or re-pair the files before analysis.",
         )
 

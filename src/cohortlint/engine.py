@@ -53,6 +53,29 @@ def _add_cross_file_reference_findings(inspections: list[Inspection], findings: 
             ))
 
 
+def _shared_vcf_sample_finding(
+    inspection: Inspection,
+    *,
+    sample_id: str,
+) -> Finding | None:
+    if any(finding.code == "HTS_VCF_HEADER_MISSING" for finding in inspection.findings):
+        return None
+    if sample_id in inspection.sample_names:
+        return None
+    return Finding(
+        code="HTS_VCF_SAMPLE_MISMATCH",
+        severity=Severity.ERROR,
+        message="Manifest sample is absent from the VCF genotype columns",
+        sample_id=sample_id,
+        path=inspection.path,
+        detail=(
+            f"expected {sample_id!r}; VCF samples: "
+            f"{', '.join(inspection.sample_names) or '(none)'}"
+        ),
+        remediation="Correct the manifest sample ID or use the matching VCF.",
+    )
+
+
 def check_cohort(
     manifest_path: Path,
     *,
@@ -75,6 +98,7 @@ def check_cohort(
     findings = list(manifest_findings)
     reference = load_fai(reference_fai) if reference_fai else None
     inspections: list[Inspection] = []
+    vcf_cache: dict[str, Inspection] = {}
 
     sites = {row.site for row in rows if row.site}
     if rows and not sites:
@@ -132,15 +156,26 @@ def check_cohort(
             variants = Path(row.variants)
             lower = variants.name.lower()
             if lower.endswith((".vcf", ".vcf.gz")):
-                inspection = inspect_vcf(
-                    variants,
-                    sample_id=row.sample_id,
-                    reference=reference,
-                    max_records=max_records,
-                    full=full,
-                )
-                inspections.append(inspection)
-                findings.extend(inspection.findings)
+                cache_key = str(variants.resolve(strict=False))
+                vcf_inspection = vcf_cache.get(cache_key)
+                if vcf_inspection is None:
+                    vcf_inspection = inspect_vcf(
+                        variants,
+                        sample_id=row.sample_id,
+                        reference=reference,
+                        max_records=max_records,
+                        full=full,
+                    )
+                    vcf_cache[cache_key] = vcf_inspection
+                    inspections.append(vcf_inspection)
+                    findings.extend(vcf_inspection.findings)
+                else:
+                    sample_finding = _shared_vcf_sample_finding(
+                        vcf_inspection,
+                        sample_id=row.sample_id,
+                    )
+                    if sample_finding is not None:
+                        findings.append(sample_finding)
             else:
                 findings.append(Finding(
                     code="VARIANT_FORMAT_UNSUPPORTED",

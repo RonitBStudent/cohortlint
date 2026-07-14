@@ -4,7 +4,7 @@ title: "CohortLint: preflight interoperability checks for genomic cohorts"
 type: software
 authors:
   - name: "CohortLint contributors"
-version: 0.1.0
+version: 0.1.1
 date-released: 2026-07-13
 repository-code: "https://github.com/RonitBStudent/cohortlint"
 url: "https://github.com/RonitBStudent/cohortlint"
