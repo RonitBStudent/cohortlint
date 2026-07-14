@@ -4,6 +4,7 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cohortlint.manifest import MANIFEST_FIELDS, discover, load_manifest, write_manifest
 from cohortlint.model import ManifestRow, Severity
@@ -203,16 +204,15 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("DUPLICATE_FILE_OWNERSHIP", {finding.code for finding in findings})
 
     def test_invalid_manifest_path_becomes_a_finding(self) -> None:
-        # Python 3.10's CSV writer rejects NUL before CohortLint can exercise
-        # its invalid-path handling, so construct this deliberately malformed
-        # fixture directly.
-        manifest = self.root / "manifest.csv"
-        manifest.write_text(
-            ",".join(MANIFEST_FIELDS) + "\nalpha,,bad\0path.fastq,,,\n",
-            encoding="utf-8",
+        manifest = self.write_csv(
+            [list(MANIFEST_FIELDS), ["alpha", "", "invalid.fastq", "", "", ""]]
         )
 
-        rows, findings = load_manifest(manifest)
+        with patch(
+            "cohortlint.manifest._resolve_path",
+            side_effect=ValueError("invalid path"),
+        ):
+            rows, findings = load_manifest(manifest)
 
         self.assertEqual(len(rows), 1)
         self.assertIn("MANIFEST_PATH_INVALID", self.codes(findings))
