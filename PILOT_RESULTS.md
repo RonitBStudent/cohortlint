@@ -67,7 +67,7 @@ Their local SHA-256 checksums were, respectively,
 
 The 53-test suite passed locally with Python 3.12.2 and again with Python
 3.13.3. GitHub Actions run
-[`29299922496`](https://github.com/RonitBStudent/cohortlint/actions/runs/29299922496)
+[`29380472934`](https://github.com/RonitBStudent/cohortlint/actions/runs/29380472934)
 then passed the full unit-test, installed-pilot, Ruff, and mypy workflow under
 Python 3.10, 3.12, and 3.13 on both Ubuntu and macOS. Its fixtures are
 intentionally small and constructed to exercise known conditions, including
