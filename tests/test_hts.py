@@ -210,6 +210,67 @@ class HtsInspectionTests(unittest.TestCase):
 
         self.assertIn("HTS_VCF_READ_ERROR", self.codes(result))
         self.assertIn("HTS_VCF_HEADER_MISSING", self.codes(result))
+        self.assertFalse(result.metrics["scan_complete"])
+
+    def test_vcf_requires_fileformat_declaration(self) -> None:
+        path = self.root / "missing-fileformat.vcf"
+        path.write_text(
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample-1\n"
+            "chr1\t1\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\n",
+            encoding="utf-8",
+        )
+
+        result = inspect_vcf(path, sample_id="sample-1", full=True)
+
+        self.assertIn("HTS_VCF_FILEFORMAT_MISSING", self.codes(result))
+
+    def test_vcf_requires_exact_mandatory_header_columns(self) -> None:
+        path = self.root / "wrong-columns.vcf"
+        path.write_text(
+            "##fileformat=VCFv4.3\n"
+            "#CHROM\tPOS\tID\tALT\tREF\tQUAL\tFILTER\tINFO\tFORMAT\tsample-1\n"
+            "chr1\t1\t.\tG\tA\t.\tPASS\t.\tGT\t0/1\n",
+            encoding="utf-8",
+        )
+
+        result = inspect_vcf(path, sample_id="sample-1", full=True)
+
+        finding = next(
+            finding
+            for finding in result.findings
+            if finding.code == "HTS_VCF_HEADER_INVALID"
+        )
+        self.assertEqual(finding.severity, Severity.ERROR)
+        self.assertIn("expected", finding.detail)
+
+    def test_plain_text_named_vcf_gz_reports_compression_mismatch(self) -> None:
+        path = self.root / "mislabelled.vcf.gz"
+        path.write_text(
+            "##fileformat=VCFv4.3\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample-1\n"
+            "chr1\t1\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\n",
+            encoding="utf-8",
+        )
+
+        result = inspect_vcf(path, sample_id="sample-1", full=True)
+
+        self.assertIn("HTS_VCF_COMPRESSION_MISMATCH", self.codes(result))
+        self.assertFalse(result.metrics["compressed"])
+        self.assertTrue(result.metrics["scan_complete"])
+
+    def test_observed_contigs_are_not_reported_as_a_sequence_dictionary(self) -> None:
+        path = self.root / "no-contig-dictionary.vcf"
+        path.write_text(
+            "##fileformat=VCFv4.3\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample-1\n"
+            "chr1\t1\t.\tA\tG\t.\tPASS\t.\tGT\t0/1\n",
+            encoding="utf-8",
+        )
+
+        result = inspect_vcf(path, sample_id="sample-1", full=True)
+
+        self.assertEqual(result.contigs, ())
+        self.assertEqual(result.metrics["observed_contigs"], ("chr1",))
 
     def test_valid_bgzf_bam_extracts_sample_and_reference_dictionary(self) -> None:
         path = self.write_bam()

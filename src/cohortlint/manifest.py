@@ -9,6 +9,7 @@ format-specific checkers.
 from __future__ import annotations
 
 import csv
+import io
 import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -30,6 +31,10 @@ _FASTQ_EXTENSION = re.compile(r"(?i)\.(?:fastq|fq)(?:\.gz)?$")
 _FASTQ_MATE = re.compile(
     # Examples: sample_R1, sample_R2_001, sample_1, sample_L001_R1_001.
     r"^(?P<sample>.+?)[_.-](?P<read>R?[12])(?:[_.-](?P<chunk>\d+))?$",
+    re.IGNORECASE,
+)
+_FASTQ_LANE = re.compile(
+    r"^(?P<sample>.+?)[_.-]L(?P<lane>\d{3})$",
     re.IGNORECASE,
 )
 
@@ -78,11 +83,14 @@ def _fastq_identity(path: str | Path) -> tuple[str, int | None, str]:
     match = _FASTQ_MATE.fullmatch(stem)
     if match is None:
         return stem, None, ""
-    return (
-        match.group("sample"),
-        int(match.group("read")[-1]),
-        match.group("chunk") or "",
-    )
+    sample = match.group("sample")
+    chunk = match.group("chunk") or ""
+    lane_match = _FASTQ_LANE.fullmatch(sample)
+    if lane_match is not None:
+        sample = lane_match.group("sample")
+        lane = f"L{lane_match.group('lane')}"
+        chunk = f"{lane}_{chunk}" if chunk else lane
+    return sample, int(match.group("read")[-1]), chunk
 
 
 def _validate_fastq_pair(row: ManifestRow) -> list[Finding]:
@@ -422,12 +430,27 @@ def load_manifest(
                     continue
                 seen_ids[identity] = line_number
 
-                path_values = {
-                    field: _resolve_path(value(field), source.parent)
-                    if value(field)
-                    else ""
-                    for field in _PATH_FIELDS
-                }
+                path_values: dict[str, str] = {}
+                for field in _PATH_FIELDS:
+                    raw_path = value(field)
+                    if not raw_path:
+                        path_values[field] = ""
+                        continue
+                    try:
+                        path_values[field] = _resolve_path(raw_path, source.parent)
+                    except (OSError, ValueError) as exc:
+                        findings.append(
+                            _finding(
+                                "MANIFEST_PATH_INVALID",
+                                Severity.ERROR,
+                                f"{field} contains an invalid path",
+                                sample_id=sample_id,
+                                path=source,
+                                detail=f"line {line_number}: {exc}",
+                                remediation="Replace the path with a valid local filesystem path.",
+                            )
+                        )
+                        path_values[field] = ""
                 rows.append(
                     ManifestRow(
                         sample_id=sample_id,
@@ -510,6 +533,7 @@ def discover(
 
     findings: list[Finding] = []
     grouped: dict[str, tuple[str, dict[str, str]]] = {}
+    multipart_fastqs: dict[str, set[str]] = {}
     candidates = root.rglob("*") if recursive else root.iterdir()
 
     try:
@@ -536,6 +560,11 @@ def discover(
         sample_id, role, ambiguous = classified
         resolved = str(path.resolve(strict=False))
         sample_id = sample_id.strip()
+
+        if role in {"fastq_1", "fastq_2"}:
+            _fastq_sample, _mate, part = _fastq_identity(path)
+            if part:
+                multipart_fastqs.setdefault(sample_id.casefold(), set()).add(part)
 
         if not sample_id:
             findings.append(
@@ -588,6 +617,24 @@ def discover(
         )
     )
 
+    for identity, parts in sorted(multipart_fastqs.items()):
+        if len(parts) < 2:
+            continue
+        canonical_id = grouped.get(identity, (identity, {}))[0]
+        findings.append(
+            _finding(
+                "DISCOVERY_MULTIPART_FASTQ_UNSUPPORTED",
+                Severity.ERROR,
+                "multiple FASTQ lanes or chunks cannot be represented in one manifest row",
+                sample_id=canonical_id,
+                detail="detected parts: " + ", ".join(sorted(parts)),
+                remediation=(
+                    "Merge technical FASTQ parts upstream before using the generated manifest; "
+                    "do not treat lanes as separate biological samples."
+                ),
+            )
+        )
+
     if recognized == 0:
         findings.append(
             _finding(
@@ -607,17 +654,24 @@ def write_manifest(rows: Iterable[ManifestRow], path: Path) -> None:
 
     destination = Path(path).expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(MANIFEST_FIELDS)
-        for row in rows:
-            writer.writerow(
-                (
-                    row.sample_id,
-                    row.site,
-                    row.fastq_1,
-                    row.fastq_2,
-                    row.alignment,
-                    row.variants,
-                )
+    destination.write_text(render_manifest(rows), encoding="utf-8", newline="")
+
+
+def render_manifest(rows: Iterable[ManifestRow]) -> str:
+    """Render rows using CohortLint's stable CSV column order."""
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(MANIFEST_FIELDS)
+    for row in rows:
+        writer.writerow(
+            (
+                row.sample_id,
+                row.site,
+                row.fastq_1,
+                row.fastq_2,
+                row.alignment,
+                row.variants,
             )
+        )
+    return output.getvalue()

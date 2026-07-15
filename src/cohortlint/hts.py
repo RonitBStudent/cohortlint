@@ -10,6 +10,17 @@ from .model import Finding, Inspection, ReferenceIndex, Severity
 
 
 _VALID_REF = re.compile(r"^[ACGTN]+$", re.IGNORECASE)
+_VALID_VCF_FILEFORMAT = re.compile(r"^VCFv[0-9]+\.[0-9]+$")
+_VCF_MANDATORY_COLUMNS = (
+    "#CHROM",
+    "POS",
+    "ID",
+    "REF",
+    "ALT",
+    "QUAL",
+    "FILTER",
+    "INFO",
+)
 _BAM_MAGIC = b"BAM\x01"
 _MAX_BAM_HEADER_BYTES = 64 * 1024 * 1024
 _MAX_BAM_REFERENCES = 1_000_000
@@ -222,6 +233,7 @@ def inspect_vcf(
     observed_set: set[str] = set()
     records_inspected = 0
     truncated = False
+    read_error = False
     compressed = False
     indexed = False
 
@@ -236,7 +248,18 @@ def inspect_vcf(
                 detail=f"max_records={max_records!r}",
             )
         )
-        return Inspection(kind="vcf", path=str(path), findings=tuple(findings))
+        return Inspection(
+            kind="vcf",
+            path=str(path),
+            metrics={
+                "records_inspected": 0,
+                "scan_complete": False,
+                "compressed": False,
+                "indexed": False,
+                "observed_contigs": (),
+            },
+            findings=tuple(findings),
+        )
 
     try:
         compressed = _has_gzip_magic(path)
@@ -252,7 +275,30 @@ def inspect_vcf(
                 remediation="Check the manifest path and file permissions.",
             )
         )
-        return Inspection(kind="vcf", path=str(path), findings=tuple(findings))
+        return Inspection(
+            kind="vcf",
+            path=str(path),
+            metrics={
+                "records_inspected": 0,
+                "scan_complete": False,
+                "compressed": False,
+                "indexed": False,
+                "observed_contigs": (),
+            },
+            findings=tuple(findings),
+        )
+
+    if path.name.lower().endswith(".vcf.gz") and not compressed:
+        findings.append(
+            _finding(
+                "HTS_VCF_COMPRESSION_MISMATCH",
+                Severity.ERROR,
+                "VCF filename indicates gzip compression but its contents are plain text",
+                sample_id=sample_id,
+                path=path,
+                remediation="Compress the VCF with bgzip or rename a genuinely plain VCF to .vcf.",
+            )
+        )
 
     if compressed:
         index_paths = _index_candidates(path, (".tbi", ".csi"))
@@ -271,6 +317,7 @@ def inspect_vcf(
 
     header_seen = False
     header_columns: tuple[str, ...] = ()
+    fileformat_values: list[str] = []
     duplicate_contigs: set[str] = set()
     malformed_contig_headers: list[str] = []
     malformed_records: list[str] = []
@@ -303,7 +350,9 @@ def inspect_vcf(
                     line = line.lstrip("\ufeff")
 
                 if line.startswith("##") and not header_seen:
-                    if line.startswith("##contig="):
+                    if line.startswith("##fileformat="):
+                        fileformat_values.append(line.removeprefix("##fileformat="))
+                    elif line.startswith("##contig="):
                         try:
                             contig = _parse_vcf_contig(line)
                         except ValueError as exc:
@@ -333,15 +382,21 @@ def inspect_vcf(
                         continue
                     header_seen = True
                     header_columns = tuple(line.split("\t"))
-                    if len(header_columns) < 8:
+                    mandatory_columns = header_columns[: len(_VCF_MANDATORY_COLUMNS)]
+                    if mandatory_columns != _VCF_MANDATORY_COLUMNS:
                         findings.append(
                             _finding(
                                 "HTS_VCF_HEADER_INVALID",
                                 Severity.ERROR,
-                                "VCF #CHROM header has fewer than eight columns",
+                                "VCF #CHROM header does not have the eight mandatory columns in order",
                                 sample_id=sample_id,
                                 path=path,
-                                detail=f"line {line_number}",
+                                detail=(
+                                    f"line {line_number}: expected "
+                                    f"{list(_VCF_MANDATORY_COLUMNS)!r}; found "
+                                    f"{list(mandatory_columns)!r}"
+                                ),
+                                remediation="Restore the standard VCF column names and ordering.",
                             )
                         )
                     sample_names = header_columns[9:] if len(header_columns) > 9 else ()
@@ -425,6 +480,7 @@ def inspect_vcf(
                 last_contig = chrom
                 last_position = position
     except (OSError, EOFError, UnicodeError, gzip.BadGzipFile) as exc:
+        read_error = True
         findings.append(
             _finding(
                 "HTS_VCF_READ_ERROR",
@@ -436,6 +492,46 @@ def inspect_vcf(
                 remediation="Re-transfer or regenerate the VCF and its index.",
             )
         )
+
+    if not fileformat_values:
+        findings.append(
+            _finding(
+                "HTS_VCF_FILEFORMAT_MISSING",
+                Severity.ERROR,
+                "VCF has no required ##fileformat declaration",
+                sample_id=sample_id,
+                path=path,
+                remediation="Add a ##fileformat=VCFv4.x declaration as the first header line.",
+            )
+        )
+    else:
+        invalid_fileformats = [
+            value for value in fileformat_values if not _VALID_VCF_FILEFORMAT.fullmatch(value)
+        ]
+        if invalid_fileformats:
+            findings.append(
+                _finding(
+                    "HTS_VCF_FILEFORMAT_INVALID",
+                    Severity.ERROR,
+                    "VCF has an invalid ##fileformat declaration",
+                    sample_id=sample_id,
+                    path=path,
+                    detail=", ".join(repr(value) for value in invalid_fileformats),
+                    remediation="Use a standard declaration such as ##fileformat=VCFv4.3.",
+                )
+            )
+        if len(fileformat_values) > 1:
+            findings.append(
+                _finding(
+                    "HTS_VCF_FILEFORMAT_DUPLICATE",
+                    Severity.ERROR,
+                    "VCF declares ##fileformat more than once",
+                    sample_id=sample_id,
+                    path=path,
+                    detail=", ".join(fileformat_values),
+                    remediation="Retain one authoritative ##fileformat declaration.",
+                )
+            )
 
     if not header_seen:
         findings.append(
@@ -566,11 +662,10 @@ def inspect_vcf(
             )
         )
 
-    inspection_contigs: tuple[tuple[str, int | None], ...]
-    if declared_contigs:
-        inspection_contigs = tuple(declared_contigs)
-    else:
-        inspection_contigs = tuple((name, None) for name in observed_contigs)
+    # ``Inspection.contigs`` is consumed as an authoritative sequence dictionary
+    # by cohort-level compatibility checks.  Record observations are necessarily
+    # incomplete, so only explicit ##contig declarations belong here.
+    inspection_contigs = tuple(declared_contigs)
 
     if reference is not None:
         findings.extend(
@@ -602,9 +697,10 @@ def inspect_vcf(
 
     metrics = {
         "records_inspected": records_inspected,
-        "scan_complete": not truncated,
+        "scan_complete": not truncated and not read_error,
         "compressed": compressed,
         "indexed": indexed,
+        "observed_contigs": tuple(observed_contigs),
     }
     return Inspection(
         kind="vcf",
