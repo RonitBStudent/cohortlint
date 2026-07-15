@@ -10,6 +10,7 @@ import hashlib
 import json
 import platform
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -116,6 +117,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _doctor_python(stdout: str) -> tuple[str, str]:
+    match = re.search(r"^\s*Python\s+(\S+)\s+\((.+)\)\s*$", stdout, re.MULTILINE)
+    if match is None:
+        raise PilotFailure("doctor output did not identify the target Python")
+    return match.group(1), match.group(2)
+
+
 def _prepare_workspace(requested: Path | None) -> tuple[Path, bool]:
     if requested is None:
         return Path(tempfile.mkdtemp(prefix="cohortlint pilot ")), True
@@ -136,6 +144,7 @@ def run_pilot(executable: str, workspace: Path) -> dict[str, object]:
 
     doctor = _run(executable, "doctor")
     _require(doctor.returncode == 0 and "Core       ready" in doctor.stdout, "doctor failed", doctor)
+    target_python, target_python_executable = _doctor_python(doctor.stdout)
     scenarios.append("doctor")
 
     schema = _run(executable, "schema")
@@ -373,7 +382,9 @@ def run_pilot(executable: str, workspace: Path) -> dict[str, object]:
         "cohortlint": version.stdout.strip(),
         "executable": str(Path(executable).resolve(strict=False)),
         "host": platform.platform(),
-        "python": platform.python_version(),
+        "python": target_python,
+        "python_executable": target_python_executable,
+        "harness_python": platform.python_version(),
         "scenario_count": len(scenarios),
         "scenarios": scenarios,
         "elapsed_seconds": round(time.perf_counter() - started, 3),

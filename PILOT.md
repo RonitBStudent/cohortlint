@@ -33,7 +33,8 @@ unique file. It is a bounded prefix scan, not a random or statistically
 representative sample. `--full` streams every FASTQ and VCF record. BAM checks
 cover the header, reference dictionary, adjacent index presence, and BGZF EOF
 marker; they do not validate every BAM alignment record. CRAM support depends
-on `samtools` and has not yet been exercised with a real CRAM file.
+on `samtools`; the owner baseline includes one small public CRAM/CRAI fixture,
+not broad production-CRAM compatibility.
 
 ## Who qualifies
 
@@ -53,7 +54,8 @@ The first cohort of participants should deliberately cover different roles and
 formats: at least one sequencing core, one team receiving collaborator data,
 one multi-site study, and one workflow maintainer, with FASTQ, BAM, and VCF all
 represented. Actual CRAM is optional exploratory work and must not determine
-pilot success until it has its own validated baseline.
+pilot success unless the participant has an approved reference setup and a
+qualified analyst available to compare CohortLint with direct samtools checks.
 
 ## Exclusions and unsupported inputs
 
@@ -120,9 +122,10 @@ cohortlint --version
 cohortlint doctor
 ```
 
-`samtools` is required only for CRAM. Linux and Python 3.10 are useful pilot
-targets because they have not yet completed the same owner-device validation as
-macOS with Python 3.12 and 3.13.
+`samtools` is required only for CRAM. Hosted CI covers Ubuntu and macOS under
+Python 3.10, 3.12, and 3.13. External pilots should still span different
+institutional environments because hosted CI and one owner Mac do not measure
+site-specific installation, storage, policy, or workflow behavior.
 
 ## Two-week procedure
 
@@ -273,9 +276,10 @@ than omitted. Advancement to a broader beta should additionally require:
 - reproducible installation from an immutable release artifact;
 - no unexplained error on clean, independently reviewed controls;
 - documented handling of every confirmed false positive;
-- successful Linux and Python 3.10 coverage;
-- real FASTQ and CRAM evidence, plus multi-gigabyte performance measurements;
-  and
+- successful runs in at least two institutional environments independent of
+  the maintainer;
+- additional participant-origin FASTQ and, when in scope, CRAM evidence, plus
+  representative real-data runtime measurements; and
 - multiple independent labs willing to use the tool again for non-clinical
   preflight checks.
 
